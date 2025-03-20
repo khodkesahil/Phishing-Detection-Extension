@@ -1,140 +1,70 @@
-// Background script for Phishing URL Detector extension
-
-// Default icons
-const DEFAULT_ICON = {
-  "48": "icon48.png",
-  "128": "icon128.png"
-};
-
-// Warning icons (when a phishing URL is detected)
-const WARNING_ICON = {
-  "48": "warning_icon48.png",
-  "128": "warning_icon128.png"
-};
-
-// Initialize extension state
-let currentState = {
-  isWarning: false,
-  lastCheckedUrl: "",
-  apiEndpoint: "http://localhost:5000/check_url" // Default API endpoint
-};
-
-// Listen for installation event
-chrome.runtime.onInstalled.addListener(() => {
-  console.log("Phishing URL Detector extension installed");
-  setDefaultIcon();
-});
-
-// Function to set the default icon
-function setDefaultIcon() {
-  chrome.action.setIcon({ path: DEFAULT_ICON });
-  currentState.isWarning = false;
-}
-
-// Function to set the warning icon
-function setWarningIcon() {
-  chrome.action.setIcon({ path: WARNING_ICON });
-  currentState.isWarning = true;
-}
-
-// Function to show a notification
-function showNotification(title, message) {
-  chrome.notifications.create({
-    type: "basic",
-    iconUrl: currentState.isWarning ? WARNING_ICON["48"] : DEFAULT_ICON["48"],
-    title: title,
-    message: message
+// Function to check URL with the API
+function checkUrlWithApi(url, callback) {
+  fetch('https://phishing-detection-extension-3ouc.onrender.com/check-url', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ url: url })
+  })
+  .then(response => {
+    if (!response.ok) {
+      throw new Error('Network response was not ok');
+    }
+    return response.json();
+  })
+  .then(data => {
+    callback(data);
+  })
+  .catch(error => {
+    callback({ error: error.message });
   });
 }
 
-// Listen for messages from popup or content scripts
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === "checkUrl") {
-    checkUrl(message.url)
-      .then(result => {
-        sendResponse(result);
-        
-        // Update icon based on result
-        if (result.is_phishing) {
-          setWarningIcon();
-          showNotification(
-            "Phishing Alert", 
-            `The URL ${message.url} may be unsafe!`
-          );
-        } else {
-          setDefaultIcon();
-        }
-      })
-      .catch(error => {
-        console.error("Error checking URL:", error);
-        sendResponse({ error: "Failed to check URL" });
-      });
-    
-    // Return true to indicate we will respond asynchronously
-    return true;
-  }
-  
-  if (message.action === "resetIcon") {
-    setDefaultIcon();
-    sendResponse({ success: true });
-    return true;
-  }
-  
-  if (message.action === "updateApiEndpoint") {
-    currentState.apiEndpoint = message.endpoint;
-    sendResponse({ success: true });
-    return true;
-  }
-});
-
-// Function to check URL with the API
-async function checkUrl(url) {
-  try {
-    currentState.lastCheckedUrl = url;
-    
-    const response = await fetch(currentState.apiEndpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ url: url })
-    });
-    
-    if (!response.ok) {
-      throw new Error(`API response error: ${response.status}`);
-    }
-    
-    return await response.json();
-  } catch (error) {
-    console.error("Error in checkUrl:", error);
-    throw error;
-  }
-}
-
-// Optional: Listen for tab updates to check URLs automatically
-// Uncomment if you want the extension to automatically check URLs when navigating
-/*
+// Listen for tab updates
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete' && tab.url) {
-    // Only check http/https URLs
-    if (tab.url.startsWith('http')) {
-      checkUrl(tab.url)
-        .then(result => {
-          if (result.is_phishing) {
-            setWarningIcon();
-            showNotification(
-              "Phishing Alert", 
-              `The URL ${tab.url} may be unsafe!`
-            );
-          } else {
-            setDefaultIcon();
-          }
-        })
-        .catch(error => {
-          console.error("Error checking URL automatically:", error);
-        });
-    }
+  // Only check when the page is fully loaded and has a valid URL
+  if (changeInfo.status === 'complete' && tab.url && tab.url.startsWith('http')) {
+    checkUrlWithApi(tab.url, (result) => {
+      if (!result.error && result.result) {
+        const predictionLabel = result.result.prediction_label;
+        const predictionScore = result.result.prediction_score;
+        
+        // Update the extension badge based on the result
+        if (predictionLabel === "1") {
+          // Phishing detected
+          chrome.action.setBadgeText({ text: "⚠️", tabId: tabId });
+          chrome.action.setBadgeBackgroundColor({ color: "#FF0000", tabId: tabId });
+          
+          // Notify the content script to show a warning
+          chrome.tabs.sendMessage(tabId, {
+            action: "showWarning",
+            score: predictionScore
+          });
+        } else {
+          // Safe site
+          chrome.action.setBadgeText({ text: "✓", tabId: tabId });
+          chrome.action.setBadgeBackgroundColor({ color: "#00FF00", tabId: tabId });
+        }
+        
+        // Store the result for the popup
+        chrome.storage.local.set({ [tab.url]: result });
+      }
+    });
   }
 });
-*/
 
+// Handle messages from popup or content scripts
+chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
+  if (request.action === 'checkUrl') {
+    checkUrlWithApi(request.url, sendResponse);
+    return true; // Required to use sendResponse asynchronously
+  }
+  
+  if (request.action === 'getCurrentUrl') {
+    chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+      sendResponse({url: tabs[0].url});
+    });
+    return true;
+  }
+});
